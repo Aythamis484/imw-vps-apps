@@ -2,33 +2,35 @@
 set -euo pipefail
 
 # =========================================================
-# Despliegue de Webapp Go con systemd en Ubuntu 24.04
+# Despliegue de Webapp Node.js con systemd en Ubuntu 24.04
 # =========================================================
 #
-# El fichero main.go con el código de la app debe estar en la misma carpeta
+# server.js y package.json deben estar en la misma carpeta
+
 # ---------- Config ----------
-INSTALL_DIR="/opt/gowebapp"          # Carpeta de despliegue
-APP_BIN="gowebapp"                   # Nombre del binario
-APP_PORT="8080"                      # Puerto de escucha
-MODULE_PATH="goapp.example.com"      # Cambia si quieres
-SERVICE_NAME="gowebapp.service"
-ENV_FILE="/etc/default/gowebapp"
-APP_USER="gowebapp"                  # Usuario del servicio
+INSTALL_DIR="/opt/nodewebapp"       # Carpeta donde se despliega la app
+APP_ENTRY="server.js"               # Archivo de entrada Node.js
+SERVICE_NAME="nodewebapp.service"
+ENV_FILE="/etc/default/nodewebapp"
+APP_USER="nodewebapp"               # Usuario del servicio
+APP_PORT="8081"                     # Puerto HTTP
 
 log() { printf "\n\033[1;34m[INFO]\033[0m %s\n" "$*"; }
-require_root() { [[ $EUID -eq 0 ]] || { echo "[ERROR] Ejecuta este script como root o con sudo."; exit 1; }; }
+require_root() { [[ $EUID -eq 0 ]] || { echo "[ERROR] Ejecuta este script como root."; exit 1; }; }
 
 # 0) Requisitos
 require_root
 
-# 1) Instalar Go
-log "Actualizando sistema e instalando Go…"
+# 1) Instalar Node.js
+log "Actualizando sistema e instalando Node.js 20 LTS…"
 apt update
 apt upgrade -y
-apt install -y golang curl ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
 
-log "Verificando Go instalado…"
-go version
+log "Node instalado:"
+node -v
+npm -v
 
 # 2) Usuario del servicio
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
@@ -36,50 +38,40 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
   useradd --system --no-create-home --shell /usr/sbin/nologin "$APP_USER"
 fi
 
-# 3) Proyecto
+# 3) Copia del proyecto
 log "Creando directorio de instalación en $INSTALL_DIR…"
 mkdir -p "$INSTALL_DIR"
 
-log "copiando main.go…"
-if ! [ -f main.go ]; then
-  log "No existe main.go. Debe estar en la misma carpeta que el script"
-  exit 1
-fi
-cp main.go "$INSTALL_DIR"
+log "Copiando archivos del proyecto…"
+# Se copian server.js, package.json, package-lock.json, .env y carpetas
+cp -r ./* "$INSTALL_DIR"
 
 cd "$INSTALL_DIR"
 
-# 4) Módulo y build (¡aquí está el arreglo!)
-log "Inicializando módulo y resolviendo dependencias…"
-# nos aseguramos de estar dentro de $INSTALL_DIR
-cd "$INSTALL_DIR"
-if ! [ -f go.mod ]; then
-  go mod init "$MODULE_PATH"
-fi
-go mod tidy
+# 4) Instalación de dependencias
+log "Instalando dependencias de Node.js…"
+npm install --omit=dev
 
-log "Compilando binario…"
-go build -o "$APP_BIN" .
-
-# Permisos
-chown -R "$APP_USER":"$APP_USER" "$INSTALL_DIR"
-chmod 750 "$INSTALL_DIR"
-chmod 750 "$INSTALL_DIR/$APP_BIN"
-
-# 5) Env del servicio
-log "Escribiendo archivo de entorno en $ENV_FILE…"
-cat > "$ENV_FILE" <<EOF
-# Variables de entorno para $SERVICE_NAME
+# 5) Archivo .env (si no existe)
+if [ ! -f "$ENV_FILE" ]; then
+  log "Generando archivo de entorno en $ENV_FILE…"
+  cat > "$ENV_FILE" <<EOF
 PORT=$APP_PORT
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NODE_ENV=production
 EOF
+fi
+
 chmod 644 "$ENV_FILE"
 
-# 6) Unidad systemd
+# 6) Permisos
+chown -R "$APP_USER":"$APP_USER" "$INSTALL_DIR"
+chmod 750 "$INSTALL_DIR"
+
+# 7) Unidad systemd
 log "Creando unidad systemd: /etc/systemd/system/$SERVICE_NAME"
 cat > "/etc/systemd/system/$SERVICE_NAME" <<EOF
 [Unit]
-Description=Go WebApp (muestra hora e IP)
+Description=Node.js WebApp (Express)
 After=network-online.target
 Wants=network-online.target
 
@@ -89,7 +81,7 @@ User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$INSTALL_DIR/$APP_BIN
+ExecStart=/usr/bin/node $INSTALL_DIR/$APP_ENTRY
 Restart=on-failure
 RestartSec=3
 
@@ -107,7 +99,7 @@ MemoryDenyWriteExecute=true
 WantedBy=multi-user.target
 EOF
 
-# 7) UFW (si procede)
+# 8) UFW
 if command -v ufw >/dev/null 2>&1; then
   if ufw status | grep -q "Status: active"; then
     log "Abriendo puerto $APP_PORT/TCP en UFW…"
@@ -115,8 +107,8 @@ if command -v ufw >/dev/null 2>&1; then
   fi
 fi
 
-# 8) Habilitar e iniciar servicio
-log "Recargando systemd, habilitando e iniciando el servicio…"
+# 9) Iniciar servicio
+log "Cargando systemd e iniciando servicio…"
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
@@ -126,12 +118,12 @@ systemctl --no-pager --full status "$SERVICE_NAME" || true
 
 echo
 echo "=============================================="
-echo " Despliegue completado"
+echo "   Despliegue Node.js completado"
 echo "----------------------------------------------"
-echo "Binario:           $INSTALL_DIR/$APP_BIN"
 echo "Servicio:          $SERVICE_NAME"
-echo "Entorno:           $ENV_FILE"
-echo "Usuario servicio:  $APP_USER"
+echo "Directorio:        $INSTALL_DIR"
+echo "Archivo entorno:   $ENV_FILE"
+echo "Puerto:            $APP_PORT"
 echo
 echo "Comandos útiles:"
 echo "  sudo systemctl status $SERVICE_NAME"
@@ -140,5 +132,4 @@ echo "  sudo systemctl restart $SERVICE_NAME"
 echo
 echo "Accede a:"
 echo "  http://<ip_servidor>:$APP_PORT/"
-echo "  http://<ip_servidor>:$APP_PORT/api"
 echo "=============================================="
